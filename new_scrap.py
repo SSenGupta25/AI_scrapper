@@ -1,5 +1,3 @@
-'USE THIS FOR SCRAPING THE EVENTS AND SAVING TO A JSON FILE'
-
 import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
@@ -9,195 +7,258 @@ from groq import Groq
 
 # ---- CONFIG ----
 client = Groq(api_key="")
-BASE_URL = "https://events.informamarkets.com/en/event-listing.html"
 
-# Paste your example event card HTML here
+# Example card HTML for schema generation
 EXAMPLE_CARD_HTML = """
-<div class="event-item event-item-id-UBM25DVT" data-start-date="2025-11-05" data-end-date="2025-11-07" data-city="Ho Chi Minh City" data-country="Vietnam" data-region="Asia">
-  <div class="event-logo item-logo">
-    <img class="event-logo-image item-logo-image" src="/content/dam/Informa/informa-markets/events-logos/VIET-DATA-CONFEX.png" alt="Data Center Vietnam">
-  </div>
-  <div class="event-data item-data">
-    <span class="item-name event-name event-title has-logo">Vietnam Data Center & Cloud Confex</span>
-    <div class="event-dates item-dates">
-      <span class="event-start-date item-start-date">05</span>
-      <span class="event-date-separator item-date-separator">-</span>
-      <span class="event-end-date item-end-date">07 November, 2025</span>
+<div class="card-digitalprofile-bottom">
+    <p class="card-digitalprofile-name">CAFE' CENTRO BRASIL VITTORIO WURZBURGER SAS &amp; C. </p>
+    <div class="card-digitalprofile-position-category">
+        <div class="card-digitalprofile-position">
+            <p>POSITION</p>
+            <p class="line-clamp-2">A1/161</p>
+        </div>
     </div>
-    <div class="event-location item-location">
-      <span class="event-location-city item-location-city first">Ho Chi Minh City</span>
-      <span class="event-location-separator item-location-separator">,</span>
-      <span class="event-location-state item-location-state">Ho Chi Minh City</span>
-      <span class="event-location-country item-location-country">Vietnam</span>
-    </div>
-  </div>
-  <div class="event-actions item-actions actions">
-    <a class="event-website item-website website" target="_blank" href="https://vietnamdatacentercloud.com/en/">View Event Site</a>
-  </div>
+    <p class="card-digitalprofile-cta-wrapper">
+        <a href="/en/profile-detail/CAFE%20CENTRO%20BRASIL%20VITTORIO%20WURZBURGER%20SAS%20%20C?digitalProfileId=1182718"
+           class="btn btn-plain size-sm"
+           aria-label="show">
+            <span class="label">show</span>
+            <span class="material-icons-outlined icon">arrow_forward</span>
+        </a>
+    </p>
 </div>
 """
 
+# ============================================================
+# INPUT URL & PAGINATION TYPE
+# ============================================================
+BASE_URL = input("Enter website URL: ").strip()
 
-async def fetch_rendered_html():
+print("Pagination type options:")
+print("1 = infinite_scroll")
+print("2 = load_more_button")
+print("3 = load_more_link")
+
+pagination_options = {
+    "1": "infinite_scroll",
+    "2": "load_more_button",
+    "3": "load_more_link"
+}
+
+user_input = input("Enter pagination type: ").strip()
+PAGINATION_TYPE = pagination_options.get(user_input, "infinite_scroll")
+print(f"Using pagination type: {PAGINATION_TYPE}")
+
+# ============================================================
+#   FETCH HTML WITH AUTO-PAGINATION (Updated for Load More + Cookie Modal)
+# ============================================================
+async def fetch_rendered_html(schema, pagination_type="infinite_scroll"):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
+
         print(f"🌐 Loading {BASE_URL} ...")
-
         await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_selector(".event-item", timeout=20000)
+        await asyncio.sleep(2)
 
-        print("📜 Scrolling to load all events (advanced mode)...")
-
-        last_height = 0
-        same_count = 0
-        max_scrolls = 200  # safety limit
-        scroll_pause = 3   # seconds between scrolls
-
-        for i in range(max_scrolls):
-            # Scroll to bottom gradually (simulates human scrolling)
-            await page.evaluate(
-                "window.scrollBy(0, document.body.scrollHeight / 2)"
+        # --------------------------
+        # Accept cookie modal if exists
+        # --------------------------
+        try:
+            cookie_btn = await page.query_selector(
+                "button#onetrust-accept-btn-handler, button.cookie-accept, button[data-cookie='accept']"
             )
-            await asyncio.sleep(scroll_pause)
+            if cookie_btn:
+                print("🍪 Closing cookie modal...")
+                await cookie_btn.click()
+                await asyncio.sleep(1)  # wait for modal to disappear
+        except Exception as e:
+            print(f"ℹ️ No cookie modal found or failed to close: {e}")
 
-            # Try clicking "Load More" if exists
-            load_more = await page.query_selector("button, a")
-            if load_more:
-                btn_text = (await load_more.inner_text() or "").lower()
-                if "load more" in btn_text or "show more" in btn_text:
+        prev_card_count = 0
+        max_cycles = 50
+
+        print("🔄 Pagination started...")
+
+        for cycle in range(max_cycles):
+            print(f"\n=== Pagination cycle {cycle + 1} ===")
+
+            # --------------------------
+            # Handle different pagination types
+            # --------------------------
+            if pagination_type == "load_more_button":
+                btn = await page.query_selector("div.load-more-wrapper button.load-more")
+                if btn:
+                    await btn.scroll_into_view_if_needed()
+                    print("➕ Clicking Load More button")
                     try:
-                        print("🖱️ Clicking 'Load More' button...")
-                        await load_more.click()
-                        await asyncio.sleep(4)
-                    except Exception:
-                        pass
+                        await btn.click(timeout=10000)
+                        await asyncio.sleep(2)  # wait for new cards to load
+                    except Exception as e:
+                        print(f"⚠️ Failed to click Load More button: {e}")
+                else:
+                    print("ℹ️ No Load More button found")
 
-            # Check if new content appeared
-            new_height = await page.evaluate("document.body.scrollHeight")
-            new_count = await page.locator(".event-item").count()
+            elif pagination_type == "load_more_link":
+                link = await page.query_selector("a.load-more, a.event-items-list-action-load-more")
+                if link:
+                    await link.scroll_into_view_if_needed()
+                    print("➕ Clicking Load More link")
+                    try:
+                        await link.click(timeout=10000)
+                        await asyncio.sleep(2)
+                    except Exception as e:
+                        print(f"⚠️ Failed to click Load More link: {e}")
+                else:
+                    print("ℹ️ No Load More link found")
 
-            print(f"🔍 Scroll {i+1}: height={new_height}, cards={new_count}")
+            elif pagination_type == "infinite_scroll":
+                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
 
-            if new_height == last_height:
-                same_count += 1
-            else:
-                same_count = 0
+            # --------------------------
+            # Count current cards
+            # --------------------------
+            current_card_count = await page.evaluate(
+                f"document.querySelectorAll('{schema['card_selector']}').length"
+            )
+            print(f"📊 Total cards now: {current_card_count}")
 
-            last_height = new_height
-
-            # Stop if no change for multiple iterations
-            if same_count >= 3:
-                print("✅ All events loaded (no further growth detected).")
+            if current_card_count == prev_card_count:
+                print("✅ No more new cards, stopping pagination.")
                 break
 
-        # Wait a bit for final content rendering
-        await asyncio.sleep(3)
+            prev_card_count = current_card_count
+
+        print("📦 Extracting fully rendered HTML...")
         html = await page.content()
         await browser.close()
         return html
 
-
-
-
-def generate_parser_code(example_card_html):
-    """Use the LLM to tweak/auto-generate the parser."""
+# ============================================================
+# GENERATE CARD SCHEMA
+# ============================================================
+def generate_card_schema(example_card_html):
     prompt = f"""
-    You are a Python code assistant.
-    I will give you the HTML of one event card from a web page.
+    You are an HTML structure analysis expert.
 
-    Your task is to update the following function so it correctly extracts data for all event cards on the same page.
-    The code is defined below (fix syntax, selectors, etc.):
+    I will give you ONE repeating card element HTML.
+    Identify the correct CSS selector for all cards on the page.
+    Identify child selectors for:
+       - title / name
+       - description
+       - link
+       - image
+       - metadata (booth number, hall, role, country, etc.)
 
-    ```python
-    def parse_events(html):
-        soup = BeautifulSoup(html, "html.parser")
+    Do NOT invent selectors.
 
-        cards = soup.select("div.event-item") or ('a.href') please select the one that is present in the provided HTML.
-        print(f"✅ Found {{len(cards)}} event cards.")
+    Return JSON ONLY:
 
-        events = []
-        for card in cards:
-            # Title
-            title_tag = card.select_one(".event-name, .item-name")
-            title = title_tag.get_text(strip=True) if title_tag else None
+    {{
+      "card_selector": "CSS SELECTOR",
+      "fields": {{
+         "title": "CSS OR null",
+         "link": "CSS OR null",
+         "image": "CSS OR null",
+         "metadata": {{
+             "ROLE": "CSS OR null",
+             "CITY": "CSS OR null",
+             "COUNTRY": "CSS OR null",
+             "BOOTH": "CSS OR null"
+          }}
+      }}
+    }}
 
-            # Event website
-            link_tag = card.select_one("a.event-website")
-            event_page = link_tag["href"] if link_tag and link_tag.has_attr("href") else None
-
-            # Image
-            image_tag = card.select_one("img.event-logo-image")
-            image_url = image_tag["src"] if image_tag and image_tag.has_attr("src") else None
-
-            # Location
-            city = card.get("data-city") or ""
-            country = card.get("data-country") or ""
-            location = ", ".join([v for v in [city, country] if v])
-
-            # Dates
-            start_date = card.get("data-start-date")
-            end_date = card.get("data-end-date")
-            if start_date and end_date:
-                date = f"{{start_date}} - {{end_date}}"
-            elif start_date:
-                date = start_date
-            else:
-                date = None
-
-            # Region (optional)
-            region = card.get("data-region")
-
-            events.append({{
-                "title": title,
-                "date": date,
-                "location": location,
-                "region": region,
-                "event_page": event_page,
-                "image_url": image_url,
-            }})
-
-        return events
-    ```
-    Just for "event_page", sometimes the HTML format have link entered inside 'href' of anchor tag directly.
-    Also keep in mind the first HTML in JSON.
-    Example event card HTML:
+    HTML example:
     {example_card_html}
-    
     """
 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
+        temperature=0.0,
     )
 
-    code = response.choices[0].message.content
-    match = re.search(r"```python(.*?)```", code, re.S)
-    return match.group(1).strip() if match else code.strip()
+    raw = response.choices[0].message.content
+    match = re.search(r"```json(.*?)```", raw, re.S)
+    json_text = match.group(1).strip() if match else raw
 
+    try:
+        return json.loads(json_text)
+    except Exception:
+        cleaned = re.sub(r"[^{}:,\"\[\]A-Za-z0-9_\-\s./]", "", json_text)
+        return json.loads(cleaned)
 
+# ============================================================
+# PARSE CARDS
+# ============================================================
+def parse_cards(html, schema):
+    soup = BeautifulSoup(html, "html.parser")
+    card_selector = schema.get("card_selector")
+    fields = schema.get("fields", {})
+
+    cards = soup.select(card_selector)
+    print(f"🔍 Found {len(cards)} cards using selector: {card_selector}")
+
+    results = []
+    for card in cards:
+        item = {}
+
+        # Title
+        sel = fields.get("title")
+        if sel:
+            tag = card.select_one(sel)
+            item["title"] = tag.get_text(strip=True) if tag else None
+
+        # Link
+        sel = fields.get("link")
+        link = None
+        if sel:
+            tag = card.select_one(sel)
+            if tag:
+                link = tag.get("href") or tag.get("data-href")
+        item["link"] = link
+
+        # Image
+        sel = fields.get("image")
+        img = None
+        if sel:
+            tag = card.select_one(sel)
+            if tag:
+                img = tag.get("src") or tag.get("data-src")
+        item["image"] = img
+
+        # Metadata
+        metadata_schema = fields.get("metadata", {})
+        metadata = {}
+        for key, sel in metadata_schema.items():
+            tag = card.select_one(sel) if sel else None
+            metadata[key] = tag.get_text(strip=True) if tag else None
+
+        item["metadata"] = metadata
+        results.append(item)
+
+    return results
+
+# ============================================================
+# MAIN
+# ============================================================
 async def main():
-    html = await fetch_rendered_html()
+    print("🧠 Requesting LLM schema...")
+    schema = generate_card_schema(EXAMPLE_CARD_HTML)
+    print("\n📜 Generated Schema:")
+    print(json.dumps(schema, indent=2))
 
-    print("🧠 Generating parser code from your event card snippet...")
-    parser_code = generate_parser_code(EXAMPLE_CARD_HTML)
+    html = await fetch_rendered_html(schema)
+    print("\n🔧 Parsing cards...")
+    items = parse_cards(html, schema)
+    print(f"\n🎉 Extracted {len(items)} items.")
 
-    # Execute the generated parser code
-    local_vars = {}
-    exec(parser_code, globals(), local_vars)
-    parse_events = local_vars.get("parse_events")
-
-    print("✅ Parser function loaded. Now extracting events...")
-    events = parse_events(html)
-
-    print(f"\n🎉 Extracted {len(events)} events.\n")
-    with open("events_duesseldorf.json", "w", encoding="utf-8") as f:
-        json.dump(events, f, indent=2, ensure_ascii=False)
-
-    print("💾 Saved to events_duesseldorf.json")
-
+    with open("extracted_cards.json", "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, ensure_ascii=False)
+    print("💾 Saved → extracted_cards.json")
 
 if __name__ == "__main__":
     asyncio.run(main())
